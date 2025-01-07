@@ -1,94 +1,63 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from datetime import datetime
+from http.server import BaseHTTPRequestHandler
+import supabase
 import os
-from supabase import create_client, Client
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
 
-# Supabase environment variables from Vercel
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")  
+# Initialize Supabase client
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
+supabase_client = supabase.create_client(SUPABASE_URL, SUPABASE_KEY)
 
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Fetch watchlist data from Supabase
+        watchlist = supabase_client.table("watchlist").select("*").execute()
+        if watchlist.error:
+            self.send_error(500, str(watchlist.error))
+            return
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("Supabase URL and KEY must be set as environment variables.")
+        results = []
+        for item in watchlist.data:
+            watchlist_id = item["id"]
+            street_name = item["street_name"]
+            city_name = item["city_name"]
 
-# Supabase client setup
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+            # Scrape Funda website for listings on this street in the city
+            funda_url = f"https://www.funda.nl/en/koop/{city_name}/straat-{street_name.replace(' ', '-')}/"
+            response = requests.get(funda_url)
+            if response.status_code != 200:
+                continue  # Skip this entry if Funda scraping fails
 
-# FastAPI app setup
-app = FastAPI()
+            soup = BeautifulSoup(response.content, "html.parser")
+            properties = soup.find_all("div", class_="search-result")  # Adjust class based on Funda structure
 
-# Pydantic models
-class WatchlistRequest(BaseModel):
-    street_name: str
-    city_name: str
+            for prop in properties:
+                # Extract details (adjust based on Funda HTML structure)
+                address = prop.find("h2", class_="search-result__header-title").text.strip()
+                status = prop.find("span", class_="search-result-label").text.strip() if prop.find("span", class_="search-result-label") else "Available"
+                price = prop.find("span", class_="search-result-price").text.strip()
+                scanned_at = datetime.utcnow().isoformat()
 
-class WatchlistResponse(BaseModel):
-    id: int
-    street_name: str
-    city_name: str
+                # Append result to list
+                results.append({
+                    "watchlist_id": watchlist_id,
+                    "address": address,
+                    "status": status,
+                    "price": price,
+                    "scanned_at": scanned_at
+                })
 
-# CRUD operations for Watchlist
+        # Insert results into Supabase `scan_results` table
+        if results:
+            insert_response = supabase_client.table("scan_results").insert(results).execute()
+            if insert_response.error:
+                self.send_error(500, str(insert_response.error))
+                return
 
-# Create a new watchlist entry
-@app.post("/watchlist/add", response_model=WatchlistResponse)
-def add_watchlist_item(item: WatchlistRequest):
-    # Check if the entry already exists
-    existing_item = supabase.table("watchlist").select("*").eq("street_name", item.street_name).eq("city_name", item.city_name).execute()
-    if existing_item.data:
-        raise HTTPException(status_code=400, detail="Entry already exists in the watchlist")
-
-    # Insert the new watchlist item
-    new_item = {
-        "street_name": item.street_name,
-        "city_name": item.city_name
-    }
-    response = supabase.table("watchlist").insert(new_item).execute()
-    if response.status_code != 201:
-        raise HTTPException(status_code=500, detail="Failed to add item to the watchlist")
-    return response.data[0]
-
-# Retrieve all watchlist entries
-@app.get("/watchlist/", response_model=list[WatchlistResponse])
-def list_watchlist():
-    response = supabase.table("watchlist").select("*").execute()
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Failed to retrieve watchlist entries")
-    return response.data
-
-# Update an existing watchlist entry
-@app.put("/watchlist/update/{watchlist_id}", response_model=WatchlistResponse)
-def update_watchlist_item(watchlist_id: int, item: WatchlistRequest):
-    # Check if the entry exists
-    existing_item = supabase.table("watchlist").select("*").eq("id", watchlist_id).execute()
-    if not existing_item.data:
-        raise HTTPException(status_code=404, detail="Watchlist entry not found")
-
-    # Update the watchlist item
-    updated_item = {
-        "street_name": item.street_name,
-        "city_name": item.city_name
-    }
-    response = supabase.table("watchlist").update(updated_item).eq("id", watchlist_id).execute()
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Failed to update watchlist entry")
-    return response.data[0]
-
-# Delete a watchlist entry
-@app.delete("/watchlist/delete/{watchlist_id}")
-def delete_watchlist_item(watchlist_id: int):
-    # Check if the entry exists
-    existing_item = supabase.table("watchlist").select("*").eq("id", watchlist_id).execute()
-    if not existing_item.data:
-        raise HTTPException(status_code=404, detail="Watchlist entry not found")
-
-    # Delete the watchlist item
-    response = supabase.table("watchlist").delete().eq("id", watchlist_id).execute()
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Failed to delete watchlist entry")
-    return {"detail": "Watchlist entry deleted successfully"}
-
-# Example route for health check
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
+        # Send a success response
+        self.send_response(200)
+        self.send_header("Content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(bytes('{"status": "success", "message": "Scan completed!"}', "utf-8"))
