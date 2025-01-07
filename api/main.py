@@ -5,8 +5,9 @@ import os
 from supabase import create_client, Client
 
 # Supabase environment variables from Vercel
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY")  
+
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Supabase URL and KEY must be set as environment variables.")
