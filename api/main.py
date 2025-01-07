@@ -61,3 +61,4 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "application/json")
         self.end_headers()
         self.wfile.write(bytes('{"status": "success", "message": "Scan completed!"}', "utf-8"))
+
